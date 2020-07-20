@@ -19,6 +19,7 @@ import (
 	client "github.com/projectcalico/libcalico-go/lib/clientv3"
 	cerrors "github.com/projectcalico/libcalico-go/lib/errors"
 	"github.com/projectcalico/libcalico-go/lib/ipam"
+	logsettings "github.com/projectcalico/libcalico-go/lib/logsettings"
 	"github.com/projectcalico/libcalico-go/lib/net"
 	"github.com/projectcalico/libcalico-go/lib/options"
 	"github.com/projectcalico/typha/pkg/syncclientutils"
@@ -27,6 +28,21 @@ import (
 	"github.com/projectcalico/node/buildinfo"
 	"github.com/projectcalico/node/pkg/calicoclient"
 )
+
+func DebuggingConfigurationHandler(logLevel api.LogLevel, i interface{}) {
+	log.Infof("Detected a default DebuggingConfiguration change. Processing it.", logLevel)
+
+	// Currently log severity in DebuggingConfiguration can only be set to Info or Debug.
+	// Setting it to Info or not setting at all means fall back to other mechanism.
+	// Setting it to Debug has priority over anything else.
+	if logLevel == api.LogLevelDebug {
+		log.Info("Set log severity to Debug")
+		log.SetLevel(log.DebugLevel)
+	} else {
+		log.Info("Set log severity to Info")
+		log.SetLevel(log.InfoLevel)
+	}
+}
 
 // This file contains the main processing and common logic for assigning tunnel addresses,
 // used by calico/node to set the host's tunnel address if IPIP or VXLAN is enabled on the pool or
@@ -49,6 +65,10 @@ func Run(done <-chan struct{}) {
 
 	// Load the client config from environment.
 	cfg, c := calicoclient.CreateClient()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logsettings.RegisterForLogSettings(ctx, c, api.ComponentCalicoNode, nodename, DebuggingConfigurationHandler, nil)
 
 	run(nodename, cfg, c, done)
 }
@@ -532,7 +552,7 @@ func removeHostTunnelAddr(ctx context.Context, c client.Interface, nodename stri
 			if _, ok := err.(cerrors.ErrorResourceDoesNotExist); !ok {
 				// Unknown error releasing the address.
 				logCtx.WithError(err).WithFields(log.Fields{
-					"IP": ipAddrStr,
+					"IP":     ipAddrStr,
 					"Handle": handle,
 				}).Fatal("Error releasing address by handle")
 			}

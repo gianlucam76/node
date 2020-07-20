@@ -31,6 +31,7 @@ import (
 	api "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	client "github.com/projectcalico/libcalico-go/lib/clientv3"
 	cerrors "github.com/projectcalico/libcalico-go/lib/errors"
+	logsettings "github.com/projectcalico/libcalico-go/lib/logsettings"
 	"github.com/projectcalico/libcalico-go/lib/names"
 	cnet "github.com/projectcalico/libcalico-go/lib/net"
 	"github.com/projectcalico/libcalico-go/lib/numorstring"
@@ -65,6 +66,8 @@ const (
 	KubeadmConfigConfigMap = "kubeadm-config"
 	// Rancher clusters store their state in this config map in the kube-system namespace.
 	RancherStateConfigMap = "full-cluster-state"
+
+	DEBUGGING_CONFIGURATION_LOG_LEVEL = "STARTUP_DEBUGGING_CONFIGURATION_LOG_LEVEL"
 )
 
 // Version string, set during build.
@@ -79,6 +82,24 @@ var (
 	globalFelixConfigName     = "default"
 	felixNodeConfigNamePrefix = "node."
 )
+
+func DebuggingConfigurationHandler(logLevel api.LogLevel, i interface{}) {
+	log.Infof("Detected a default DebuggingConfiguration change. Processing it.", logLevel)
+
+	// Currently log severity in DebuggingConfiguration can only be set to Info or Debug.
+	// Setting it to Info or not setting at all means fall back to other mechanism.
+	// Setting it to Debug has priority over anything else.
+	if logLevel == api.LogLevelDebug {
+		log.Info("Set log severity to Debug")
+		if err := os.Setenv(DEBUGGING_CONFIGURATION_LOG_LEVEL, "DEBUG"); err != nil {
+			log.Info("failed to set environment variable ", err)
+		}
+		configureLogging()
+	} else {
+		os.Unsetenv(DEBUGGING_CONFIGURATION_LOG_LEVEL)
+		log.Info("Set log severity based on configureLogging")
+	}
+}
 
 // This file contains the main startup processing for the calico/node.  This
 // includes:
@@ -96,7 +117,8 @@ func Run() {
 	// Create the Calico API cli.
 	cfg, cli := calicoclient.CreateClient()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// An explicit value of true is required to wait for the datastore.
 	if os.Getenv("WAIT_FOR_DATASTORE") == "true" {
@@ -105,6 +127,8 @@ func Run() {
 	} else {
 		log.Info("Skipping datastore connection test")
 	}
+
+	logsettings.RegisterForLogSettings(ctx, cli, api.ComponentCalicoNode, nodeName, DebuggingConfigurationHandler, nil)
 
 	if cfg.Spec.DatastoreType == apiconfig.Kubernetes {
 		if err := ensureKDDMigrated(cfg, cli); err != nil {
@@ -285,13 +309,19 @@ func configureLogging() {
 	// Default to info level logging
 	logLevel := log.InfoLevel
 
-	rawLogLevel := os.Getenv("CALICO_STARTUP_LOGLEVEL")
-	if rawLogLevel != "" {
-		parsedLevel, err := log.ParseLevel(rawLogLevel)
-		if err == nil {
-			logLevel = parsedLevel
-		} else {
-			log.WithError(err).Error("Failed to parse log level, defaulting to info.")
+	// If DebuggingConfiguration has log level set to debug, it takes precedence over anything else.
+	// Otherwise fall back to environment variables
+	if os.Getenv(DEBUGGING_CONFIGURATION_LOG_LEVEL) != "" {
+		logLevel = log.DebugLevel
+	} else {
+		rawLogLevel := os.Getenv("CALICO_STARTUP_LOGLEVEL")
+		if rawLogLevel != "" {
+			parsedLevel, err := log.ParseLevel(rawLogLevel)
+			if err == nil {
+				logLevel = parsedLevel
+			} else {
+				log.WithError(err).Error("Failed to parse log level, defaulting to info.")
+			}
 		}
 	}
 
